@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Draft Table</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to designs</a>
+
+  <div class="app" id="app" data-view="loading">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Draft Table</span>
+      </div>
+
+      <button class="btn btn-quiet boards-toggle" id="boards-toggle" type="button" aria-haspopup="dialog">
+        <span data-icon="layers"></span>
+        <span>Boards</span>
+      </button>
+
+      <div class="topbar-end">
+        <p class="save-status" id="save-status" role="status" data-state="idle">
+          <span class="save-dot" aria-hidden="true"></span>
+          <span class="save-text" id="save-text">Stored on this computer</span>
+          <span class="save-short" id="save-short" aria-hidden="true">Local</span>
+        </p>
+        <a class="btn btn-quiet" id="export-all" href="/api/export" download aria-label="Export all boards as ZIP" title="Export all boards as ZIP">
+          <span data-icon="download"></span>
+          <span class="hide-sm">Export all</span>
+        </a>
+      </div>
+    </header>
+
+    <aside class="sidebar" aria-label="Boards">
+      <div class="sidebar-head">
+        <h2 class="sidebar-title">Boards</h2>
+        <button class="icon-btn" id="new-board" type="button" aria-label="New board" title="New board">
+          <span data-icon="plus"></span>
+        </button>
+      </div>
+      <nav aria-label="Boards list">
+        <ul class="board-list" id="board-list"></ul>
+      </nav>
+      <div class="sidebar-foot">
+        <p class="local-note">
+          <span data-icon="drive"></span>
+          <span>Saved on this computer. No accounts, no sign-in.</span>
+        </p>
+        <p class="usage" id="usage"></p>
+        <button class="link-btn danger-link" id="reset-open" type="button">Delete all local data</button>
+      </div>
+    </aside>
+
+    <main class="main" id="main" tabindex="-1">
+      <section class="view view-loading" id="view-loading" aria-labelledby="loading-title">
+        <h1 class="visually-hidden" id="loading-title">Loading</h1>
+        <p class="loading-text">Opening your boards</p>
+        <div class="skeleton-grid" aria-hidden="true">
+          <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+          <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+        </div>
+      </section>
+
+      <section class="view view-error" id="view-error" aria-labelledby="error-title" hidden>
+        <div class="state-block">
+          <span class="state-icon" data-icon="alert"></span>
+          <h1 class="state-title" id="error-title">Can’t open Draft Table</h1>
+          <p class="state-text" id="error-text">The local app didn’t respond.</p>
+          <button class="btn btn-primary" id="retry" type="button">
+            <span data-icon="refresh"></span><span>Try again</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="view view-board" id="view-board" aria-labelledby="board-title" hidden>
+        <header class="board-head">
+          <div class="board-title-row">
+            <h1 class="board-title" id="board-title" tabindex="-1"></h1>
+            <div class="board-title-actions">
+              <button class="icon-btn" id="rename-board" type="button" aria-label="Rename board" title="Rename board">
+                <span data-icon="pencil"></span>
+              </button>
+              <button class="icon-btn" id="delete-board" type="button" aria-label="Delete board" title="Delete board">
+                <span data-icon="trash"></span>
+              </button>
+            </div>
+          </div>
+          <p class="board-meta" id="board-meta"></p>
+        </header>
+
+        <div class="toolbar" id="toolbar">
+          <div class="segmented" role="group" aria-label="View">
+            <button class="seg" type="button" id="view-gallery" aria-pressed="true">
+              <span data-icon="grid"></span><span>Gallery</span>
+            </button>
+            <button class="seg" type="button" id="view-compare" aria-pressed="false">
+              <span data-icon="columns"></span><span>Compare</span>
+            </button>
+          </div>
+
+          <div class="filters" id="filters" role="group" aria-label="Filter by status"></div>
+
+          <div class="toolbar-end">
+            <a class="btn btn-quiet" id="export-board" href="/api/export" download>
+              <span data-icon="download"></span><span>Export board</span>
+            </a>
+            <button class="btn btn-primary" id="add-designs" type="button">
+              <span data-icon="upload"></span><span>Add designs</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="upload-bar" id="upload-bar" hidden>
+          <p class="upload-text" id="upload-text"></p>
+          <progress id="upload-progress" max="1" value="0" aria-labelledby="upload-text"></progress>
+        </div>
+
+        <div class="board-body" id="board-body"></div>
+      </section>
+    </main>
+  </div>
+
+  <input class="visually-hidden" id="file-input" type="file" accept="image/png,image/jpeg" multiple tabindex="-1" aria-hidden="true">
+
+  <div class="drop-overlay" id="drop-overlay" hidden>
+    <p class="drop-text" id="drop-text">Drop images to add them</p>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Design detail -->
+  <dialog class="detail" id="dlg-detail" aria-labelledby="detail-title">
+    <div class="detail-shell">
+      <div class="detail-stage">
+        <div class="stage-bar">
+          <div class="stage-nav">
+            <button class="icon-btn on-dark" id="detail-prev" type="button" aria-label="Previous design" title="Previous (Left arrow)">
+              <span data-icon="chevronLeft"></span>
+            </button>
+            <span class="stage-count" id="detail-count" aria-live="polite"></span>
+            <button class="icon-btn on-dark" id="detail-next" type="button" aria-label="Next design" title="Next (Right arrow)">
+              <span data-icon="chevronRight"></span>
+            </button>
+          </div>
+          <div class="stage-tools">
+            <button class="btn btn-dark" id="detail-zoom" type="button" aria-pressed="false">
+              <span data-icon="maximize"></span><span id="detail-zoom-label">Actual size</span>
+            </button>
+            <button class="icon-btn on-dark" id="detail-close" type="button" aria-label="Close design" title="Close (Esc)">
+              <span data-icon="x"></span>
+            </button>
+          </div>
+        </div>
+        <div class="stage-canvas" id="stage-canvas" tabindex="0" aria-label="Design preview">
+          <img class="stage-img" id="detail-img" alt="">
+          <p class="stage-broken" id="detail-broken" hidden>Preview unavailable</p>
+        </div>
+      </div>
+
+      <div class="detail-panel">
+        <header class="detail-head">
+          <div class="detail-title-row">
+            <h2 class="detail-title" id="detail-title"></h2>
+            <button class="icon-btn" id="detail-rename" type="button" aria-label="Rename design" title="Rename design">
+              <span data-icon="pencil"></span>
+            </button>
+          </div>
+          <fieldset class="status-radios">
+            <legend class="field-label">Status</legend>
+            <div class="radio-row" id="detail-status"></div>
+          </fieldset>
+          <dl class="meta-list" id="detail-meta"></dl>
+        </header>
+
+        <section class="comments" aria-labelledby="comments-title">
+          <h3 class="comments-title" id="comments-title">Comments</h3>
+          <div class="thread-list" id="thread-list"></div>
+          <form class="composer" id="composer" novalidate>
+            <label class="field-label" for="composer-text">Add a comment</label>
+            <textarea class="textarea" id="composer-text" rows="3" maxlength="2000" placeholder="What works, what to change"></textarea>
+            <div class="composer-row">
+              <span class="hint"><kbd>Ctrl</kbd> <kbd>Enter</kbd> to post</span>
+              <button class="btn btn-primary" type="submit">Comment</button>
+            </div>
+          </form>
+        </section>
+
+        <footer class="detail-foot">
+          <a class="link-btn" id="detail-open-file" href="#" target="_blank" rel="noopener noreferrer">Open image file</a>
+          <button class="link-btn danger-link" id="detail-delete" type="button">Delete design</button>
+        </footer>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Text input (new board, rename) -->
+  <dialog class="sheet" id="dlg-text" aria-labelledby="text-title">
+    <form class="sheet-form" id="text-form" novalidate>
+      <h2 class="sheet-title" id="text-title"></h2>
+      <label class="field-label" for="text-input" id="text-label"></label>
+      <input class="input" id="text-input" type="text" maxlength="100" autocomplete="off" required aria-describedby="text-error">
+      <p class="field-error" id="text-error" aria-live="polite"></p>
+      <div class="sheet-actions">
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit" id="text-submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirm -->
+  <dialog class="sheet" id="dlg-confirm" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <form class="sheet-form" id="confirm-form" novalidate>
+      <h2 class="sheet-title" id="confirm-title"></h2>
+      <p class="sheet-text" id="confirm-text"></p>
+      <div class="sheet-actions">
+        <button class="btn btn-quiet" type="button" data-close id="confirm-cancel">Cancel</button>
+        <button class="btn btn-danger" type="submit" id="confirm-submit">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Reset -->
+  <dialog class="sheet" id="dlg-reset" aria-labelledby="reset-title" aria-describedby="reset-text">
+    <form class="sheet-form" id="reset-form" novalidate>
+      <h2 class="sheet-title" id="reset-title">Delete all local data</h2>
+      <p class="sheet-text" id="reset-text">This removes every board, image and comment stored by Draft Table on this computer. It can’t be undone. Export first if you want a copy.</p>
+      <label class="field-label" for="reset-input">Type <strong>DELETE</strong> to confirm</label>
+      <input class="input" id="reset-input" type="text" autocomplete="off" spellcheck="false" autocapitalize="characters">
+      <div class="sheet-actions">
+        <button class="btn btn-quiet" type="button" data-close>Cancel</button>
+        <button class="btn btn-danger" type="submit" id="reset-submit" disabled>Delete everything</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Boards (small screens) -->
+  <dialog class="sheet sheet-boards" id="dlg-boards" aria-labelledby="boards-title">
+    <div class="sheet-form">
+      <div class="sheet-head">
+        <h2 class="sheet-title" id="boards-title">Boards</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Close boards">
+          <span data-icon="x"></span>
+        </button>
+      </div>
+      <ul class="board-list" id="board-list-sheet"></ul>
+      <div class="sheet-actions sheet-actions-split">
+        <button class="link-btn danger-link" id="reset-open-sheet" type="button">Delete all local data</button>
+        <button class="btn btn-primary" id="new-board-sheet" type="button">
+          <span data-icon="plus"></span><span>New board</span>
+        </button>
+      </div>
+      <p class="local-note">
+        <span data-icon="drive"></span>
+        <span>Saved on this computer. No accounts, no sign-in.</span>
+      </p>
+    </div>
+  </dialog>
+</body>
+</html>
