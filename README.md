@@ -56,7 +56,7 @@ The starter is intentionally for one person, or people taking turns on one trust
 python -m unittest discover -s tests -v
 ```
 
-The backend uses Python's standard library and SQLite. The interface is plain HTML, CSS and JavaScript with system fonts. Runtime dependencies: none. See [SECURITY.md](SECURITY.md), [PROVENANCE.md](PROVENANCE.md) and [design notes](docs/design-notes.md).
+The backend uses Python's standard library and SQLite. The interface is plain HTML, CSS and JavaScript with system fonts. Runtime dependencies: none. See [SECURITY.md](SECURITY.md), [PROVENANCE.md](PROVENANCE.md), [design notes](docs/design-notes.md) and the [changelog](CHANGELOG.md).
 
 Codex implemented the backend and tests. Claude Code led the interface and used its installed design guidance. The repository records that collaboration directly; it does not claim user adoption or comparative performance that has not been measured.
 

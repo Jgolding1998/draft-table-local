@@ -1,6 +1,7 @@
 """Local SQLite storage; images and their records share one atomic transaction."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import io
 import json
@@ -8,16 +9,35 @@ from pathlib import Path
 import secrets
 import sqlite3
 import threading
+import time
 import zipfile
 
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_BOARDS, MAX_DESIGNS, MAX_COMMENTS = 20, 100, 1000
+_deadline = ContextVar("draft_table_request_deadline", default=None)
 
 
 class Problem(Exception):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+@contextmanager
+def request_deadline(expires):
+    token = _deadline.set(expires)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def storage_timeout():
+    expires = _deadline.get()
+    remaining = 3 if expires is None else expires - time.monotonic()
+    if remaining <= 0:
+        raise Problem("This request expired before it could be saved. Reload before trying again.", 408)
+    return min(3, remaining)
 
 
 def now():
@@ -63,16 +83,25 @@ class Store:
 
     @contextmanager
     def connection(self):
-        with self.lock:
-            db = sqlite3.connect(self.path, timeout=3)
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA foreign_keys=ON")
+        if not self.lock.acquire(timeout=storage_timeout()):
+            storage_timeout()  # Report an expired request separately from ordinary contention.
+            raise Problem("Local storage is busy. Try again shortly.", 503)
+        try:
+            db = sqlite3.connect(self.path, timeout=storage_timeout())
             try:
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA foreign_keys=ON")
                 db.execute("BEGIN IMMEDIATE")
                 with db:
+                    storage_timeout()
                     yield db
+                    # Expired work must roll back, even if the socket has already closed.
+                    timeout_ms = max(1, int(storage_timeout() * 1000))
+                    db.execute(f"PRAGMA busy_timeout={timeout_ms}")
             finally:
                 db.close()
+        finally:
+            self.lock.release()
 
     @staticmethod
     def require(db, table, identifier):

@@ -11,8 +11,9 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+from . import __version__
 from .images import MAX_UPLOAD, inspect_image
-from .storage import MAX_BOARDS, MAX_DESIGNS, Problem, Store
+from .storage import MAX_BOARDS, MAX_DESIGNS, Problem, Store, request_deadline
 
 ID = r"[a-f0-9]{32}"
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -51,6 +52,7 @@ class Server(ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request, client_address):
+        expires = time.monotonic() + self.request_timeout
         def expire():
             try:
                 request.shutdown(socket.SHUT_RDWR)
@@ -60,7 +62,8 @@ class Server(ThreadingHTTPServer):
         deadline.daemon = True
         deadline.start()
         try:
-            super().process_request_thread(request, client_address)
+            with request_deadline(expires):
+                super().process_request_thread(request, client_address)
         finally:
             deadline.cancel()
             self.slots.release()
@@ -70,7 +73,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DraftTable/0.1"
+    server_version = f"DraftTable/{__version__}"
     sys_version = ""
     protocol_version = "HTTP/1.0"
 

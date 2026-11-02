@@ -4,6 +4,8 @@ Draft Table is a loopback-only application for a trusted computer. It is not a s
 
 The HTTP server binds only to `127.0.0.1`. It checks the exact Host and Origin and requires a per-process CSRF token for changes. It rejects duplicate or malformed content lengths, transfer encoding, unexpected bodies and unsupported routes. Requests have byte limits, inactivity timeouts, an absolute connection deadline and a four-connection concurrency limit. Large exports have a separate single-export limit.
 
+Each storage lock wait is limited to the smaller of three seconds and the request's remaining lifetime. Transactions check for expiry before committing, so a request that expires while waiting for storage is rolled back instead of applied later. A commit already in progress at the deadline may still complete; a disconnected client should reload before trying the change again.
+
 Static files are served from a fixed three-route allowlist. Images are retrieved by random IDs from SQLite. User-supplied filenames and URL paths are never used to locate files. Uploaded images are stored with their records in a transaction, so deletion cannot remove a different design's image.
 
 Only PNG and JPEG content types are accepted. PNG checks include framing, checksums, dimensions and bounded decompression. JPEG checks include marker framing and dimensions, not a full pixel decode. Image responses use the identified raster MIME type and `nosniff`; active HTML and SVG uploads are rejected. A restrictive content policy blocks external scripts, fonts, frames and connections. Comments are displayed as text rather than HTML.

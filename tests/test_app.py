@@ -1,5 +1,5 @@
 import concurrent.futures
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import http.client
 import io
 import json
@@ -18,7 +18,7 @@ import zlib
 
 from design_review.images import inspect_image, MAX_UPLOAD
 from design_review.server import Server
-from design_review.storage import Problem, Store
+from design_review.storage import Problem, Store, request_deadline
 
 
 def png(width=4, height=3, trailing=b""):
@@ -186,6 +186,79 @@ class AppTest(unittest.TestCase):
                 start = time.monotonic()
                 self.assertEqual(b"", client.recv(8192))
                 self.assertLess(time.monotonic() - start, 1.2)
+        finally:
+            self.server.request_timeout = 10
+
+    def test_expired_request_waiting_for_storage_does_not_mutate(self):
+        self.server.request_timeout = 0.1
+        attempted, finished = threading.Event(), threading.Event()
+        outcome = {}
+        original = self.server.store.add_board
+        def tracked(title):
+            attempted.set()
+            try:
+                return original(title)
+            finally:
+                finished.set()
+        def submit():
+            try:
+                outcome["status"] = self.request("POST", "/api/boards", {"title": "Too late"})[0]
+            except (http.client.HTTPException, OSError) as error:
+                outcome["error"] = type(error).__name__
+        try:
+            with patch.object(self.server.store, "add_board", tracked):
+                with self.server.store.lock:
+                    client = threading.Thread(target=submit)
+                    client.start()
+                    self.assertTrue(attempted.wait(1))
+                    client.join(1)
+                    self.assertFalse(client.is_alive(), "The request must expire while storage is blocked.")
+                self.assertTrue(finished.wait(1))
+            self.assertEqual(1, len(self.server.store.state()["boards"]), outcome)
+        finally:
+            self.server.request_timeout = 10
+
+    def test_transaction_expiring_before_commit_is_rolled_back(self):
+        inserted = False
+        with patch("design_review.storage.time.monotonic", return_value=1000) as clock:
+            with self.assertRaises(Problem) as expired:
+                with request_deadline(1060):
+                    with self.server.store.connection() as db:
+                        db.execute("INSERT INTO boards VALUES(?,?,?)", ("a" * 32, "Not committed", "2026-01-01"))
+                        inserted = True
+                        clock.return_value = 1061
+        self.assertTrue(inserted, "The transaction must expire after the insert, before commit.")
+        self.assertEqual(408, expired.exception.status)
+        self.assertEqual(1, len(self.server.store.state()["boards"]))
+
+    def test_expired_request_waiting_for_another_sqlite_connection_does_not_mutate(self):
+        self.server.request_timeout = 0.1
+        attempted, finished = threading.Event(), threading.Event()
+        original = self.server.store.add_board
+        def tracked(title):
+            attempted.set()
+            try:
+                return original(title)
+            finally:
+                finished.set()
+        def submit():
+            try:
+                self.request("POST", "/api/boards", {"title": "Blocked by another connection"})
+            except (http.client.HTTPException, OSError):
+                pass
+        try:
+            with patch.object(self.server.store, "add_board", tracked):
+                with closing(sqlite3.connect(self.server.store.path)) as blocker:
+                    blocker.execute("BEGIN IMMEDIATE")
+                    client = threading.Thread(target=submit)
+                    client.start()
+                    self.assertTrue(attempted.wait(1))
+                    client.join(1)
+                    self.assertFalse(client.is_alive())
+                    # Free the database after the client timed out, then check final state.
+                    blocker.rollback()
+                    self.assertTrue(finished.wait(1))
+            self.assertEqual(1, len(self.server.store.state()["boards"]))
         finally:
             self.server.request_timeout = 10
 

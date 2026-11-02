@@ -229,7 +229,7 @@
     let label;
     let brief;
     if (ui.pending > 0) { state = 'saving'; label = 'Saving'; brief = 'Saving'; }
-    else if (ui.failed) { state = 'error'; label = 'Last change not saved'; brief = 'Not saved'; }
+    else if (ui.failed) { state = 'error'; label = 'Last change not confirmed. Reload before retrying.'; brief = 'Check save'; }
     else if (S.loaded) { state = 'saved'; label = 'Saved on this computer'; brief = 'Saved'; }
     else { state = 'idle'; label = 'Stored on this computer'; brief = 'Local'; }
     if (el.dataset.state !== state) el.dataset.state = state;
@@ -574,8 +574,11 @@
   /** Retry an image a few times; the local server may briefly refuse with 503 while busy. */
   function retryImage(img, giveUp) {
     let tries = 0;
+    let lastSrc = null;
     img.addEventListener('error', () => {
       const src = img.getAttribute('src');
+      // The detail image is reused across designs: each new source gets its own retries.
+      if (src !== lastSrc) { lastSrc = src; tries = 0; }
       if (!src || tries >= 3) { giveUp(); return; }
       tries += 1;
       setTimeout(() => {
@@ -772,7 +775,8 @@
       } catch (err) {
         ui.failed = true;
         toast(`${item.title}: ${err.message}`, { error: true });
-        if (err.status === 0 || err.status === 404) break;
+        // Stop the batch when the server is unreachable, the board is gone or the workspace is full.
+        if (err.status === 0 || err.status === 404 || err.status === 429) break;
       }
       ui.uploading.done += 1;
       renderUploadBar();
@@ -922,7 +926,10 @@
   async function setStatus(id, status) {
     const d = findDesign(id);
     if (!d || d.status === status || !STATUS_LABEL[status]) return;
-    await mutate(() => api('PATCH', `/api/designs/${id}`, { json: { status } }), { success: `Marked ${STATUS_LABEL[status].toLowerCase()}` });
+    const res = await mutate(() => api('PATCH', `/api/designs/${id}`, { json: { status } }), { success: `Marked ${STATUS_LABEL[status].toLowerCase()}` });
+    // The select/radio already shows the new value; put back the saved status if the change failed.
+    // render() leaves the composer untouched and keeps an open reply draft.
+    if (!res) render();
   }
 
   async function renameDesign(id) {
@@ -944,17 +951,20 @@
     });
     if (!ok) return;
     const idx = ui.detailList.indexOf(id);
-    const res = await mutate(() => api('DELETE', `/api/designs/${id}`), { success: 'Design deleted' });
+    // Refresh after choosing the next design; a refresh first would close the detail view.
+    const res = await mutate(() => api('DELETE', `/api/designs/${id}`), { success: 'Design deleted', refresh: false });
     if (!res) return;
+    S.designs = S.designs.filter((x) => x.id !== id);
     if (ui.detailId === id) {
       const remaining = ui.detailList.filter((x) => x !== id && findDesign(x));
       if (remaining.length) {
         ui.detailList = remaining;
-        showDetail(remaining[Math.min(idx, remaining.length - 1)]);
+        showDetail(remaining[Math.max(0, Math.min(idx, remaining.length - 1))]);
       } else {
         closeDetail();
       }
     }
+    await loadState({ quiet: true });
   }
 
   // ---------- Detail ----------
@@ -1069,10 +1079,11 @@
     $('comments-title').replaceChildren('Comments', total ? h('span', { class: 'comments-count', text: numFmt.format(total) }) : null);
 
     const list = $('thread-list');
-    // Keep an in-progress reply draft across re-renders.
+    // Keep an in-progress reply draft across re-renders, but only for the same thread.
     const draftEl = list.querySelector('.reply-form textarea');
-    const replyDraft = draftEl ? draftEl.value : '';
-    const replyHadFocus = draftEl && document.activeElement === draftEl;
+    const sameThread = !!draftEl && !!ui.replyTo && draftEl.id === `reply-text-${ui.replyTo}`;
+    const replyDraft = sameThread ? draftEl.value : '';
+    const replyHadFocus = sameThread && document.activeElement === draftEl;
 
     if (!tops.length) {
       list.replaceChildren(h('p', { class: 'thread-empty', text: 'No comments yet. Note what works and what should change.' }));
@@ -1351,6 +1362,98 @@
     toast('All local data deleted');
     $('board-title').focus({ preventScroll: true });
   });
+
+  // ---------- Export ----------
+
+  // Fetch the ZIP first so an error never becomes a broken download.
+  const EXPORT_LINKS = ['export-all', 'export-board'];
+  const EXPORT_NAME = 'draft-table-export.zip';
+  let exporting = false;
+  let exportUrl = null;
+  let exportUrlTimer = 0;
+
+  function releaseExportUrl() {
+    clearTimeout(exportUrlTimer);
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    exportUrl = null;
+  }
+
+  function setExportBusy(busy) {
+    for (const id of EXPORT_LINKS) {
+      const link = $(id);
+      if (busy) {
+        link.setAttribute('aria-disabled', 'true');
+        link.setAttribute('aria-busy', 'true');
+      } else {
+        link.removeAttribute('aria-disabled');
+        link.removeAttribute('aria-busy');
+      }
+    }
+  }
+
+  async function fetchExport(path) {
+    for (let attempt = 0; ; attempt += 1) {
+      let res;
+      try {
+        res = await fetch(path, { method: 'GET', credentials: 'same-origin', cache: 'no-store' });
+      } catch (_) {
+        throw new ApiError(0, 'Can’t reach Draft Table. Make sure it’s still running on this computer.');
+      }
+      // GET is safe to repeat while the local server's request slots are full.
+      if (res.status === 503 && attempt < 3) {
+        await wait(250 * (attempt + 1) + Math.floor(Math.random() * 150));
+        continue;
+      }
+      return res;
+    }
+  }
+
+  async function exportZip(e) {
+    e.preventDefault();
+    if (exporting) {
+      toast('An export is already being prepared.');
+      return;
+    }
+    const path = e.currentTarget.getAttribute('href') || '/api/export';
+    exporting = true;
+    setExportBusy(true);
+    try {
+      const res = await fetchExport(path);
+      if (!res.ok) {
+        let data = null;
+        try { data = await res.json(); } catch (_) { data = null; }
+        const msg = data && typeof data.error === 'string' && data.error.trim()
+          ? data.error.trim()
+          : (STATUS_MESSAGES[res.status] || `Something went wrong (${res.status}).`);
+        throw new ApiError(res.status, msg);
+      }
+      const type = (res.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+      let blob;
+      try { blob = await res.blob(); } catch (_) { blob = null; }
+      const head = blob && blob.size >= 22 ? new Uint8Array(await blob.slice(0, 2).arrayBuffer()) : null;
+      if (type !== 'application/zip' || !head || head[0] !== 0x50 || head[1] !== 0x4b) {
+        throw new ApiError(res.status, 'The export didn’t finish as a ZIP file. Try again.');
+      }
+      const match = /filename="([A-Za-z0-9._-]+\.zip)"/.exec(res.headers.get('Content-Disposition') || '');
+      releaseExportUrl();
+      exportUrl = URL.createObjectURL(new Blob([blob], { type: 'application/zip' }));
+      const a = h('a', { href: exportUrl, download: match ? match[1] : EXPORT_NAME, hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      // Give the browser time to start the download, then free the memory.
+      exportUrlTimer = setTimeout(releaseExportUrl, 60000);
+    } catch (err) {
+      toast(err.message || 'The export didn’t finish. Try again.', { error: true });
+      if (err.status === 404) await loadState({ quiet: true });
+    } finally {
+      exporting = false;
+      setExportBusy(false);
+    }
+  }
+
+  for (const id of EXPORT_LINKS) $(id).addEventListener('click', exportZip);
+  window.addEventListener('pagehide', releaseExportUrl);
 
   // ---------- Drag, drop and paste ----------
 
