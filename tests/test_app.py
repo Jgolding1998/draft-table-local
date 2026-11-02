@@ -1,6 +1,7 @@
 import concurrent.futures
 from contextlib import closing, contextmanager
 import http.client
+from http.server import ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
@@ -158,6 +159,79 @@ class AppTest(unittest.TestCase):
             for _ in range(acquired):
                 self.server.slots.release()
         self.assertEqual(200, self.request("GET", "/api/state")[0])
+
+    def test_busy_refusal_survives_repeated_real_connections_without_a_worker(self):
+        acquired = 0
+        try:
+            for _ in range(4):
+                self.assertTrue(self.server.slots.acquire(timeout=1))
+                acquired += 1
+            with patch.object(ThreadingHTTPServer, "process_request", side_effect=AssertionError("Busy requests must not start a worker.")) as handler:
+                for number in range(1000):
+                    with self.subTest(connection=number):
+                        if number % 2:
+                            self.assertEqual(503, self.request("POST", "/api/boards", {"title": "Never admitted"})[0])
+                        else:
+                            self.assertEqual(503, self.request("GET", "/api/state")[0])
+                handler.assert_not_called()
+        finally:
+            for _ in range(acquired):
+                self.server.slots.release()
+        self.assertEqual(1, len(self.server.store.state()["boards"]))
+        self.assertEqual(200, self.request("GET", "/api/state")[0])
+
+    def test_busy_client_that_keeps_connection_open_cannot_hold_the_accept_loop(self):
+        acquired = 0
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as client:
+            try:
+                for _ in range(4):
+                    self.assertTrue(self.server.slots.acquire(timeout=1))
+                    acquired += 1
+                # Keep the client open after receiving the refusal instead of sending EOF.
+                client.sendall(f"GET /api/state HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode())
+                response = http.client.HTTPResponse(client)
+                response.begin()
+                self.assertEqual(503, response.status)
+                self.assertEqual(b"", response.read())
+            finally:
+                for _ in range(acquired):
+                    self.server.slots.release()
+            started = time.monotonic()
+            self.assertEqual(200, self.request("GET", "/api/state")[0])
+            self.assertLess(time.monotonic() - started, 1, "Busy cleanup must have an absolute deadline.")
+            response.close()
+
+    def test_busy_refusal_drain_has_a_byte_limit(self):
+        class EndlessInput:
+            received = 0
+            response = b""
+            closed = False
+            def settimeout(self, timeout):
+                pass
+            def sendall(self, data):
+                self.response += data
+            def shutdown(self, how):
+                pass
+            def recv(self, maximum):
+                self.received += maximum
+                return b"x" * maximum
+            def close(self):
+                self.closed = True
+        client = EndlessInput()
+        acquired = 0
+        try:
+            for _ in range(4):
+                self.assertTrue(self.server.slots.acquire(timeout=1))
+                acquired += 1
+            with patch("design_review.server.time.monotonic", return_value=1000):
+                self.server.process_request(client, ("127.0.0.1", 0))
+        finally:
+            for _ in range(acquired):
+                self.server.slots.release()
+        self.assertIn(b"503", client.response.split(b"\r\n")[0])
+        self.assertGreater(client.received, 0)
+        self.assertLessEqual(client.received, 65_536)
+        self.assertTrue(client.closed)
 
     def test_request_smuggling_and_unbounded_requests_are_rejected(self):
         lines = f"Host: 127.0.0.1:{self.port}\r\nOrigin: {self.origin}\r\nX-CSRF-Token: {self.csrf}\r\n"

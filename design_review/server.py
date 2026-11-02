@@ -39,8 +39,24 @@ class Server(ThreadingHTTPServer):
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
             try:
-                request.settimeout(1)
+                expires = time.monotonic() + 0.1
+                request.settimeout(0.1)
                 request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                request.shutdown(socket.SHUT_WR)
+                # Closing with unread input can reset even the 503 on Windows.
+                # Let a normal client receive it and close, without admitting a worker
+                # or letting a slow sender hold the accept loop indefinitely:
+                # this refusal uses at most 100 ms and discards at most 64 KiB.
+                remaining = 65_536
+                while remaining:
+                    timeout = expires - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    request.settimeout(timeout)
+                    chunk = request.recv(min(4096, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
             except OSError:
                 pass
             self.shutdown_request(request)

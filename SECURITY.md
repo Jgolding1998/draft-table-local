@@ -2,7 +2,9 @@
 
 Draft Table is a loopback-only application for a trusted computer. It is not a service for untrusted users, LAN access, public hosting or a reverse proxy. There is no login system.
 
-The HTTP server binds only to `127.0.0.1`. It checks the exact Host and Origin and requires a per-process CSRF token for changes. It rejects duplicate or malformed content lengths, transfer encoding, unexpected bodies and unsupported routes. Requests have byte limits, inactivity timeouts, an absolute connection deadline and a four-connection concurrency limit. Large exports have a separate single-export limit.
+The HTTP server binds only to `127.0.0.1`. It checks the exact Host and Origin and requires a per-process CSRF token for changes. It rejects duplicate or malformed content lengths, transfer encoding, unexpected bodies and unsupported routes. Requests have byte limits, inactivity timeouts, an absolute connection deadline and four admitted request workers. Large exports have a separate single-export limit.
+
+When all workers are busy, the server sends a 503 response without starting another worker. It then discards at most 64 KiB of incoming data within 100 ms before closing, giving normal clients time to read the response instead of seeing a Windows connection reset. This cleanup briefly occupies the accept loop. Larger or slower refused uploads may still reset; the refusal does not apply their change.
 
 Each storage lock wait is limited to the smaller of three seconds and the request's remaining lifetime. Transactions check for expiry before committing, so a request that expires while waiting for storage is rolled back instead of applied later. A commit already in progress at the deadline may still complete; a disconnected client should reload before trying the change again.
 
